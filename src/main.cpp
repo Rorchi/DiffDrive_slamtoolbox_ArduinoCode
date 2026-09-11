@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_MPU6050.h>
 #include <Adafruit_INA219.h>
-#include <Adafruit_Sensor.h>
 
 // --- MOTOR VE ENCODER PINLERI ---
 const int enc1A = 2;  const int enc1B = 3;
@@ -18,9 +16,10 @@ volatile long encoder1Count = 0;
 volatile long encoder2Count = 0;
 
 // --- BAGIMSIZ SENSOR DURUMLARI ---
-Adafruit_MPU6050 mpu;
 Adafruit_INA219 ina219;
 bool mpuAvailable = false;
+uint8_t mpuAddress = 0;
+uint8_t mpuWhoAmI = 0;
 bool ina219Available = false;
 
 float accelX_offset = 0.0f;
@@ -65,6 +64,11 @@ const int watchDogTimeout = 1000;
 void setTargetSpeeds(char command);
 void encoder1ISR();
 void encoder2ISR();
+int readI2cRegister(uint8_t address, uint8_t reg);
+bool writeI2cRegister(uint8_t address, uint8_t reg, uint8_t value);
+bool initImuDirect(uint8_t address);
+bool readImuDirect(float &ax, float &ay, float &az,
+                   float &gx, float &gy, float &gz);
 void calibrateImu();
 void readBattery(unsigned long nowMs);
 float estimateBatteryPercentage(float voltage);
@@ -85,12 +89,19 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(enc1A), encoder1ISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(enc2A), encoder2ISR, CHANGE);
 
-  // MPU6050 bulunamazsa yalniz IMU yayini devre disi kalir.
-  mpuAvailable = mpu.begin();
+  // Kimlik degeri farkli olan uyumlu klonlari da desteklemek icin
+  // sensoru dogrudan MPU60x0 register haritasi ile baslat.
+  mpuAvailable = initImuDirect(0x68);
   if (mpuAvailable) {
-    mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
-    mpu.setGyroRange(MPU6050_RANGE_250_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    mpuAddress = 0x68;
+  } else {
+    mpuAvailable = initImuDirect(0x69);
+    if (mpuAvailable) {
+      mpuAddress = 0x69;
+    }
+  }
+  if (mpuAvailable) {
+    mpuWhoAmI = readI2cRegister(mpuAddress, 0x75);
     calibrateImu();
   }
 
@@ -107,6 +118,18 @@ void setup() {
 
   Serial.print("{\"status\":\"baslatildi\",\"imu_ok\":");
   Serial.print(mpuAvailable ? "true" : "false");
+  Serial.print(",\"imu_address\":");
+  if (mpuAvailable) {
+    Serial.print(mpuAddress == 0x68 ? "\"0x68\"" : "\"0x69\"");
+  } else {
+    Serial.print("null");
+  }
+  Serial.print(",\"imu_who_am_i\":");
+  if (mpuAvailable) {
+    Serial.print(mpuWhoAmI);
+  } else {
+    Serial.print("null");
+  }
   Serial.print(",\"battery_ok\":");
   Serial.print(ina219Available ? "true" : "false");
   Serial.println("}");
@@ -159,14 +182,16 @@ void loop() {
   float ax = 0.0f, ay = 0.0f, az = 0.0f;
   float gx = 0.0f, gy = 0.0f, gz = 0.0f;
   if (mpuAvailable) {
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-    ax = a.acceleration.x - accelX_offset;
-    ay = a.acceleration.y - accelY_offset;
-    az = a.acceleration.z - accelZ_offset;
-    gx = g.gyro.x - gyroX_offset;
-    gy = g.gyro.y - gyroY_offset;
-    gz = g.gyro.z - gyroZ_offset;
+    if (readImuDirect(ax, ay, az, gx, gy, gz)) {
+      ax -= accelX_offset;
+      ay -= accelY_offset;
+      az -= accelZ_offset;
+      gx -= gyroX_offset;
+      gy -= gyroY_offset;
+      gz -= gyroZ_offset;
+    } else {
+      mpuAvailable = false;
+    }
   }
 
   if (ina219Available) {
@@ -193,19 +218,76 @@ void loop() {
   Serial.println("}");
 }
 
+int readI2cRegister(uint8_t address, uint8_t reg) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return -1;
+  if (Wire.requestFrom(address, static_cast<uint8_t>(1)) != 1) return -1;
+  return Wire.read();
+}
+
+bool writeI2cRegister(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool initImuDirect(uint8_t address) {
+  Wire.beginTransmission(address);
+  if (Wire.endTransmission() != 0) return false;
+
+  // Uyku modundan cik, +-2 g, +-250 derece/s ve yaklasik 20 Hz DLPF.
+  if (!writeI2cRegister(address, 0x6B, 0x00)) return false;
+  delay(100);
+  if (!writeI2cRegister(address, 0x19, 0x09)) return false;
+  if (!writeI2cRegister(address, 0x1A, 0x04)) return false;
+  if (!writeI2cRegister(address, 0x1B, 0x00)) return false;
+  if (!writeI2cRegister(address, 0x1C, 0x00)) return false;
+  return true;
+}
+
+bool readImuDirect(float &ax, float &ay, float &az,
+                   float &gx, float &gy, float &gz) {
+  Wire.beginTransmission(mpuAddress);
+  Wire.write(0x3B);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(mpuAddress, static_cast<uint8_t>(14)) != 14) return false;
+
+  const int16_t rawAx = (static_cast<int16_t>(Wire.read()) << 8) | Wire.read();
+  const int16_t rawAy = (static_cast<int16_t>(Wire.read()) << 8) | Wire.read();
+  const int16_t rawAz = (static_cast<int16_t>(Wire.read()) << 8) | Wire.read();
+  Wire.read(); Wire.read();  // Sicaklik bu projede kullanilmiyor.
+  const int16_t rawGx = (static_cast<int16_t>(Wire.read()) << 8) | Wire.read();
+  const int16_t rawGy = (static_cast<int16_t>(Wire.read()) << 8) | Wire.read();
+  const int16_t rawGz = (static_cast<int16_t>(Wire.read()) << 8) | Wire.read();
+
+  ax = (rawAx / 16384.0f) * gravityMs2;
+  ay = (rawAy / 16384.0f) * gravityMs2;
+  az = (rawAz / 16384.0f) * gravityMs2;
+  const float gyroScale = DEG_TO_RAD / 131.0f;
+  gx = rawGx * gyroScale;
+  gy = rawGy * gyroScale;
+  gz = rawGz * gyroScale;
+  return true;
+}
+
 void calibrateImu() {
   float axSum = 0.0f, aySum = 0.0f, azSum = 0.0f;
   float gxSum = 0.0f, gySum = 0.0f, gzSum = 0.0f;
 
   for (int i = 0; i < imuCalibrationSamples; i++) {
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-    axSum += a.acceleration.x;
-    aySum += a.acceleration.y;
-    azSum += a.acceleration.z;
-    gxSum += g.gyro.x;
-    gySum += g.gyro.y;
-    gzSum += g.gyro.z;
+    float ax, ay, az, gx, gy, gz;
+    if (!readImuDirect(ax, ay, az, gx, gy, gz)) {
+      mpuAvailable = false;
+      return;
+    }
+    axSum += ax;
+    aySum += ay;
+    azSum += az;
+    gxSum += gx;
+    gySum += gy;
+    gzSum += gz;
     delay(5);
   }
 
