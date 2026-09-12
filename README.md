@@ -16,7 +16,9 @@ Sol/sağ encoder ─────────────────────
                                                                  ├── /odom
                                                                  ├── odom -> base_link
                                                                  ├── /battery
-                                                                 └── /battery/power
+                                                                 ├── /battery/power
+                                                                 ├── /battery/remaining_minutes
+                                                                 └── /battery/low
 ```
 
 Arduino bir ROS 2 topic yayımlamaz. Arduino yalnızca USB seri portuna JSON satırları yazar. ROS topic'lerini Jetson üzerinde çalışan `serial_sensor_bridge.py` düğümü oluşturur.
@@ -27,6 +29,8 @@ Arduino bir ROS 2 topic yayımlamaz. Arduino yalnızca USB seri portuna JSON sat
 kasif_celebi/
 ├── platformio.ini
 ├── README.md
+├── BATARYA_IZLEME_RAPORU.md
+├── BATARYA_IZLEME_RAPORU.docx
 ├── src/
 │   └── main.cpp
 └── jetson_ros2_bridge/
@@ -34,6 +38,15 @@ kasif_celebi/
     ├── requirements.txt
     └── README.md
 ```
+
+## Teknik raporlar
+
+- [Batarya izleme raporu — Markdown](BATARYA_IZLEME_RAPORU.md)
+- [Batarya izleme raporu — Word](BATARYA_IZLEME_RAPORU.docx)
+
+Raporlarda INA219 güç bağlantısı, D22–D25 pinleri, pil yüzdesi ve kalan süre
+hesabı, LED/buzzer davranışı, USB JSON alanları ve ROS 2 topic'leri ayrıntılı
+olarak açıklanır.
 
 ## Kullanılan donanım
 
@@ -123,6 +136,7 @@ Yanmış veya hasarlı bir INA219 kartını yeniden bağlamayın.
    - Bir saniye komut alınmazsa watchdog motorları durdurur.
    - Encoder sayıları alınır ve P kontrol uygulanır.
    - Mevcut sensörlerden ölçüm alınır.
+   - Pil yüzdesi, kalan süre, LED'ler ve buzzer alarmı güncellenir.
    - Tek satırlık JSON paketi USB'ye yazılır.
 
 ## Pil yüzdesi ve kalan süre hesabı
@@ -143,9 +157,9 @@ Pil göstergesi yüzde 80–100 arasında yeşil, yüzde 50–79 arasında sarı
 histerezis uygulanır. INA219 bulunamazsa kırmızı LED yanıp söner ve buzzer kapalı
 kalır.
 
-Kalan kapasite EEPROM'da 16 döner kayıt yuvasına en fazla iki dakikada bir ve
-yüzde en az 1 değiştiğinde kaydedilir. Bu sayede yeniden başlatmada sayaç korunur
-ve EEPROM aşınması tek adreste toplanmaz.
+Kalan kapasite EEPROM'da 16 döner kayıt yuvasına, iki dakikadan daha sık
+olmayacak şekilde ve yüzde en az 1 değiştiğinde kaydedilir. Bu sayede yeniden
+başlatmada sayaç korunur ve EEPROM aşınması tek adreste toplanmaz.
 
 Sensör başlangıçlarında `while (1)` kullanılmaz. Bir sensör bulunamadığında yalnız o sensörün `*_ok` alanı `false` olur.
 
@@ -307,6 +321,9 @@ ros2 topic list
 ros2 topic hz /wheel/encoders
 ros2 topic echo /odom
 ros2 topic echo /battery
+ros2 topic echo /battery/power
+ros2 topic echo /battery/remaining_minutes
+ros2 topic echo /battery/low
 ```
 
 ## Odometri ayarları
@@ -352,6 +369,14 @@ Baud her iki tarafta da `115200` olmalıdır. Jetson bridge seri timeout değeri
 ## Mevcut sınırlamalar
 
 - MPU6050 mutlak yönelim üretmez; `orientation_covariance[0] = -1` kullanılır.
-- Kalan batarya kapasitesi akım entegrasyonuyla yaklaşık hesaplanır ve Arduino yeniden başladığında gerilimden tekrar tahmin edilir.
+- Pil yüzdesinin doğruluğu INA219 gerilim/akım kalibrasyonuna, pilin gerçek
+  kullanılabilir kapasitesine, sıcaklığa ve pil yaşına bağlıdır.
+- Kalan kapasite EEPROM'dan geri yüklenir; EEPROM kaydı geçersizse veya takılan
+  pilin gerilimiyle büyük ölçüde uyuşmuyorsa başlangıç değeri OCV tablosundan
+  yeniden hesaplanır.
+- INA219 yalnız toplam paket gerilimini ölçer. Tek hücrelerin 3,00 V altına
+  düşmesini güvenilir biçimde algılamak için 4S BMS veya hücre bazlı ölçüm gerekir.
+- INA219, mevcut ayarda yaklaşık 2 A ile sınırlıdır. Robot akımı 2 A'ı aşarsa
+  daha yüksek akıma uygun sensör ve şönt kullanılmalıdır.
 - `sensor_msgs/msg/BatteryState` içinde güç alanı bulunmadığı için güç `/battery/power` topic'inde ayrıca yayımlanır.
 - SLAM için ayrıca LiDAR `/scan` topic'i ve doğru statik TF dönüşümleri gerekir.
