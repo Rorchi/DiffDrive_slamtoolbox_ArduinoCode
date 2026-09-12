@@ -1,5 +1,7 @@
 # Kâşif Çelebi — Arduino Mega ve ROS 2 Sensör Köprüsü
 
+![Kâşif Çelebi robotunun ön görünümü](docs/images/kasif_celebi.jpeg)
+
 Bu proje, diferansiyel sürüşlü Kâşif Çelebi robotunun düşük seviye motor kontrolünü ve sensör okumalarını Arduino Mega 2560 üzerinde gerçekleştirir. Arduino verileri USB seri bağlantısı üzerinden JSON Lines biçiminde NVIDIA Jetson'a gönderir. Jetson'daki ROS 2 Humble köprüsü bu verileri standart ROS mesajlarına ve TF dönüşümlerine çevirir.
 
 Proje hata toleranslı tasarlanmıştır: MPU6050 veya INA219 bulunamadığında motor kontrolü ve encoder/odometri veri akışı durmaz. Her sensörün geçerliliği ayrı bir durum alanıyla bildirilir.
