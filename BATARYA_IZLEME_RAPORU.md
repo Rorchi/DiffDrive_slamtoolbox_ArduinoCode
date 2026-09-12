@@ -127,13 +127,13 @@ ile karşılaştırılarak ayarlanabilir.
 | Tahmini doluluk | Gösterge |
 |---:|---|
 | %80–100 | Yeşil LED; her 3 saniyede bir 300 ms yanar |
-| %50–79 | Sarı LED sürekli yanar |
-| %0–49 | Kırmızı LED sürekli yanar |
+| %50–79 | Sarı LED; her 3 saniyede bir 300 ms yanar |
+| %0–49 | Kırmızı LED; her 3 saniyede bir 300 ms yanar |
 
 Geçiş noktalarında yüzde 2 histerezis vardır. Örneğin küçük ölçüm değişimleri
 nedeniyle yüzde 80 çevresinde yeşil ve sarı LED'in sürekli yer değiştirmesi
-önlenir. INA219 algılanmazsa kırmızı LED 500 ms aralıklarla yanıp söner ve buzzer
-kapalı tutulur.
+önlenir. INA219 algılanmazsa kırmızı LED de her 3 saniyede bir 300 ms yanar ve
+buzzer kapalı tutulur.
 
 ## 5. Kalan süre ve buzzer alarmı
 

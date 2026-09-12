@@ -80,8 +80,8 @@ olarak açıklanır.
 LED'lerde seri 220–330 ohm direnç kullanılmalıdır. LOW-tetiklemeli aktif buzzer
 kritik durumda 3 saniyelik bildirim ritmini alarm başlar başlamaz ve sonrasında
 her 20 saniyede bir çalar; aradaki 17 saniye sessizdir. Alarm yokken D22 HIGH
-tutularak buzzer kapatılır. Yeşil LED sürekli yanmak yerine her 3 saniyede bir
-300 ms süreyle yanar.
+tutularak buzzer kapatılır. Seçilen pil durum LED'i (kırmızı, sarı veya yeşil)
+sürekli yanmak yerine her 3 saniyede bir 300 ms süreyle yanar.
 
 ### I²C sensörleri
 
@@ -152,8 +152,8 @@ kritik alarm verilir.
 
 Pil göstergesi yüzde 80–100 arasında yeşil, yüzde 50–79 arasında sarı ve yüzde
 0–49 arasında kırmızıdır. Sınır çevresindeki titreşimi önlemek için yüzde 2
-histerezis uygulanır. INA219 bulunamazsa kırmızı LED yanıp söner ve buzzer kapalı
-kalır.
+histerezis uygulanır. Tüm renkler her 3 saniyede bir 300 ms yanar. INA219
+bulunamazsa kırmızı LED aynı aralıkla yanıp söner ve buzzer kapalı kalır.
 
 Kalan kapasite EEPROM'da 16 döner kayıt yuvasına, iki dakikadan daha sık
 olmayacak şekilde ve yüzde en az 1 değiştiğinde kaydedilir. Bu sayede yeniden

@@ -20,8 +20,8 @@ const uint8_t buzzerActiveLevel = LOW;
 const uint8_t buzzerInactiveLevel = HIGH;
 const unsigned long buzzerMelodyPeriodMs = 20000UL;
 const unsigned long buzzerMelodyDurationMs = 3000UL;
-const unsigned long greenBlinkPeriodMs = 3000UL;
-const unsigned long greenBlinkOnMs = 300UL;
+const unsigned long ledBlinkPeriodMs = 3000UL;
+const unsigned long ledBlinkOnMs = 300UL;
 
 const int encoderLeftSign = 1;
 const int encoderRightSign = 1;
@@ -570,7 +570,8 @@ void updateBatteryAlarm(unsigned long nowMs) {
 
 void updateBatteryIndicators(unsigned long nowMs) {
   if (!ina219Available) {
-    digitalWrite(redLedPin, ((nowMs / 500UL) % 2UL) ? HIGH : LOW);
+    const bool errorPulse = (nowMs % ledBlinkPeriodMs) < ledBlinkOnMs;
+    digitalWrite(redLedPin, errorPulse ? HIGH : LOW);
     digitalWrite(yellowLedPin, LOW);
     digitalWrite(greenLedPin, LOW);
     noTone(buzzerPin);
@@ -594,13 +595,13 @@ void updateBatteryIndicators(unsigned long nowMs) {
         batteryPercentage >= 0.82f ? BATTERY_LED_GREEN : BATTERY_LED_YELLOW;
   }
 
-  digitalWrite(redLedPin, batteryLedState == BATTERY_LED_RED ? HIGH : LOW);
+  const bool ledPulse = (nowMs % ledBlinkPeriodMs) < ledBlinkOnMs;
+  digitalWrite(redLedPin,
+               batteryLedState == BATTERY_LED_RED && ledPulse ? HIGH : LOW);
   digitalWrite(yellowLedPin,
-               batteryLedState == BATTERY_LED_YELLOW ? HIGH : LOW);
-  const bool greenPulse =
-      batteryLedState == BATTERY_LED_GREEN &&
-      (nowMs % greenBlinkPeriodMs) < greenBlinkOnMs;
-  digitalWrite(greenLedPin, greenPulse ? HIGH : LOW);
+               batteryLedState == BATTERY_LED_YELLOW && ledPulse ? HIGH : LOW);
+  digitalWrite(greenLedPin,
+               batteryLedState == BATTERY_LED_GREEN && ledPulse ? HIGH : LOW);
 
   // LOW-tetiklemeli aktif buzzer alarm basladiginda ve daha sonra her 20
   // saniyede bir, 3 saniyelik bildirim ritmi calar.
