@@ -650,7 +650,7 @@ doc.add_heading("İlgili proje dosyaları", level=2)
 add_bullets(doc, [
     "src/main.cpp doğrudan I2C IMU sürücüsü, kalibrasyon ve JSON yayını",
     "platformio.ini Arduino Mega hedefi ve INA219 bağımlılığı",
-    "jetson_ros2_bridge/serial_sensor_bridge.py USB JSON verisini ROS 2 mesajlarına dönüştüren köprü",
+    "Jetson'daki serial_bridge.py USB JSON verisini ROS 2 mesajlarına dönüştüren köprü",
     "README.md sistem kurulumu, protokol ve sorun giderme komutları",
 ])
 

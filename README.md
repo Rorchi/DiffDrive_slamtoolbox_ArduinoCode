@@ -23,7 +23,7 @@ Sol/sağ encoder ─────────────────────
                                                                  └── /battery/low
 ```
 
-Arduino bir ROS 2 topic yayımlamaz. Arduino yalnızca USB seri portuna JSON satırları yazar. ROS topic'lerini Jetson üzerinde çalışan `serial_sensor_bridge.py` düğümü oluşturur.
+Arduino bir ROS 2 topic yayımlamaz. Arduino yalnızca USB seri portuna JSON satırları yazar. ROS topic'lerini Jetson üzerinde çalışan `serial_bridge.py` düğümü oluşturur. Bu tek köprü aynı zamanda `/cmd_vel` komutlarını Arduino'ya iletir.
 
 ## Dizin yapısı
 
@@ -33,12 +33,8 @@ kasif_celebi/
 ├── README.md
 ├── BATARYA_IZLEME_RAPORU.md
 ├── BATARYA_IZLEME_RAPORU.docx
-├── src/
-│   └── main.cpp
-└── jetson_ros2_bridge/
-    ├── serial_sensor_bridge.py
-    ├── requirements.txt
-    └── README.md
+└── src/
+    └── main.cpp
 ```
 
 ## Teknik raporlar
@@ -288,28 +284,32 @@ ROS ortamını yükleyin:
 source /opt/ros/humble/setup.bash
 ```
 
-Bridge'i `/dev/ttyUSB0` ile çalıştırın:
+Jetson'a kopyalanan `serial_bridge.py` dosyasının bulunduğu klasörde bridge'i
+çalıştırın:
 
 ```bash
-cd ~/Documents/PlatformIO/Projects/kasif_celebi/jetson_ros2_bridge
-
-python3 serial_sensor_bridge.py --ros-args \
-  -p port:=/dev/ttyUSB0 \
+python3 serial_bridge.py --ros-args \
+  -p port:=/dev/arduino \
   -p baudrate:=115200 \
-  -p wheel_radius_m:=0.05 \
-  -p wheel_separation_m:=0.30 \
-  -p ticks_per_revolution:=600.0
+  -p wheel_radius:=0.04 \
+  -p wheel_base:=0.20 \
+  -p encoder_ticks_per_rev:=7000.0
 ```
 
-Gerçek Jetson portu `/dev/ttyACM0` ise parametreyi buna göre değiştirin.
+`serial_bridge.py` yalnız Jetson'da tutulur; Arduino/PlatformIO proje dizininde
+ikinci bir kopyası bulunmaz. `/dev/arduino` udev bağlantısı tanımlı değilse gerçek portu, örneğin
+`/dev/ttyACM0` veya `/dev/ttyUSB0`, parametre olarak verin. Aynı seri portu
+başka bir bridge veya seri monitör ile eş zamanlı açmayın.
 
 ## ROS 2 topic'leri
 
 | Topic / TF | Mesaj tipi | Davranış |
 |---|---|---|
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | Jetson'dan alınır ve Arduino motor komutuna çevrilir |
 | `/imu/data_raw` | `sensor_msgs/msg/Imu` | Yalnız `imu_ok=true` olduğunda yayımlanır |
 | `/wheel/encoders` | `std_msgs/msg/Int64MultiArray` | `[sol_tick, sağ_tick]` |
 | `/odom` | `nav_msgs/msg/Odometry` | Diferansiyel sürüş odometrisi |
+| `/joint_states` | `sensor_msgs/msg/JointState` | Dört tekerlek ekleminin konumu |
 | `odom -> base_link` | TF | Odometri dönüşümü |
 | `/battery` | `sensor_msgs/msg/BatteryState` | INA219 yoksa `present=false`, ölçümler `NaN` |
 | `/battery/power` | `std_msgs/msg/Float32` | INA219 yoksa `NaN` |
@@ -332,10 +332,9 @@ ros2 topic echo /battery/low
 
 Bridge parametreleri gerçek robota göre ölçülmelidir:
 
-- `wheel_radius_m`: tekerlek yarıçapı
-- `wheel_separation_m`: sol ve sağ tekerlek merkezleri arasındaki mesafe
-- `ticks_per_revolution`: bir tekerlek turundaki encoder tick sayısı
-- `left_encoder_sign`, `right_encoder_sign`: yön tersse `-1.0`
+- `wheel_radius`: tekerlek yarıçapı
+- `wheel_base`: sol ve sağ tekerlek merkezleri arasındaki mesafe
+- `encoder_ticks_per_rev`: bir tekerlek turundaki encoder tick sayısı
 
 Yanlış parametreler `/odom` mesafe ve açı hesabını bozar.
 

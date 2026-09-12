@@ -187,7 +187,7 @@ için pozitif büyüklük olarak gönderilir. Yüzde değeri `0.0–1.0` aralı�
 
 ## 7. Yayımlanan ROS 2 topic'leri
 
-Jetson'daki `serial_sensor_bridge.py`, Arduino JSON verilerini aşağıdaki ROS 2
+Jetson'daki `serial_bridge.py`, Arduino JSON verilerini aşağıdaki ROS 2
 arayüzlerine dönüştürür:
 
 | Topic / TF | Mesaj tipi | İçerik |
@@ -248,4 +248,3 @@ algılanmış, yeni JSON alanları seri portta görülmüş ve `low_battery` dur
   takıldığında başlangıç OCV kontrolü kayıtla büyük uyuşmazlığı reddeder.
 - 12,00 V paket sınırı hücre başına ortalama 3,00 V anlamına gelir. Hücreler
   dengesizse bir hücre bu ortalamadan daha düşük olabilir; BMS kullanılmalıdır.
-
