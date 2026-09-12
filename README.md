@@ -42,7 +42,8 @@ kasif_celebi/
 - İki adet quadrature encoder
 - MPU6050 IMU — isteğe bağlı
 - INA219 akım/gerilim sensörü — isteğe bağlı
-- 4S 7000 mAh LiPo pil
+- 4S 3300 mAh 40C LiPo pil
+- Aktif buzzer ve kırmızı/sarı/yeşil durum LED'leri
 - NVIDIA Jetson üzerinde ROS 2 Humble
 
 ## Pin bağlantıları
@@ -60,6 +61,16 @@ kasif_celebi/
 | Motor B PWM | 6 |
 | Motor B IN1 / IN2 | 9 / 10 |
 | Motor sürücü STBY | 11 |
+| LOW-tetiklemeli aktif buzzer modülü | 22 |
+| Kırmızı LED | 23 |
+| Sarı LED | 24 |
+| Yeşil LED | 25 |
+
+LED'lerde seri 220–330 ohm direnç kullanılmalıdır. LOW-tetiklemeli aktif buzzer
+kritik durumda 3 saniyelik bildirim ritmini alarm başlar başlamaz ve sonrasında
+her 20 saniyede bir çalar; aradaki 17 saniye sessizdir. Alarm yokken D22 HIGH
+tutularak buzzer kapatılır. Yeşil LED sürekli yanmak yerine her 3 saniyede bir
+300 ms süreyle yanar.
 
 ### I²C sensörleri
 
@@ -84,7 +95,11 @@ Yaygın adresler:
 
 Standart `R100` şöntlü INA219 modülü yüksek akımlı ana motor hattı için uygun olmayabilir. Projedeki `setCalibration_32V_2A()` ayarı yaklaşık 2 A ölçüm aralığı kullanır.
 
-4S 7000 mAh 25C pil teorik olarak çok yüksek akım sağlayabilir. Motorların çalışma ve stall akımı 2 A'yı geçiyorsa standart INA219 kartını ana motor hattına bağlamayın. INA226/INA228 ve akıma uygun harici düşük değerli şönt kullanın.
+4S 3300 mAh 40C pil teorik olarak çok yüksek akım sağlayabilir. Bu projede ölçülen
+en yüksek toplam akım 1,5 A olduğu için 32 V / 2 A INA219 kalibrasyonu kullanılır.
+Motorların çalışma veya stall akımı 2 A'yı geçerse standart INA219 kartını ana
+motor hattına bağlamayın. INA226/INA228 ve akıma uygun harici düşük değerli şönt
+kullanın.
 
 Hiçbir sensör INA219 üzerinden beslenmemelidir. MPU6050 ve diğer sensörler Arduino veya uygun regülatörden beslenir. INA219 yalnızca ölçülecek güç hattına seri bağlanır:
 
@@ -109,6 +124,28 @@ Yanmış veya hasarlı bir INA219 kartını yeniden bağlamayın.
    - Encoder sayıları alınır ve P kontrol uygulanır.
    - Mevcut sensörlerden ölçüm alınır.
    - Tek satırlık JSON paketi USB'ye yazılır.
+
+## Pil yüzdesi ve kalan süre hesabı
+
+Pil 4S 3300 mAh olarak tanımlıdır. Hücre başına 4,20 V yüzde 100, 3,00 V yüzde
+0 sınırıdır; paket sınırları 16,80 V ve 12,00 V'tur. Başlangıç tahmininde doğrusal
+gerilim hesabı yerine LiPo açık-devre gerilim tablosu kullanılır. Çalışma sırasında
+INA219 akımı trapez integrasyonu ile toplanır (coulomb counting). Pil düşük akımda
+30 saniye dinlenirse sayaç, gerilim tablosuna doğru yavaşça düzeltilir.
+
+Ölçümler EMA ile süzülür. Kalan süre son 60 saniyenin filtrelenmiş ortalama
+deşarj akımından hesaplanır. Tahmin 5 dakikanın altında 10 saniye kalırsa buzzer
+uyarısı etkinleşir. Paket 12,00 V altında 2 saniye kalırsa süre tahmini beklenmeden
+kritik alarm verilir.
+
+Pil göstergesi yüzde 80–100 arasında yeşil, yüzde 50–79 arasında sarı ve yüzde
+0–49 arasında kırmızıdır. Sınır çevresindeki titreşimi önlemek için yüzde 2
+histerezis uygulanır. INA219 bulunamazsa kırmızı LED yanıp söner ve buzzer kapalı
+kalır.
+
+Kalan kapasite EEPROM'da 16 döner kayıt yuvasına en fazla iki dakikada bir ve
+yüzde en az 1 değiştiğinde kaydedilir. Bu sayede yeniden başlatmada sayaç korunur
+ve EEPROM aşınması tek adreste toplanmaz.
 
 Sensör başlangıçlarında `while (1)` kullanılmaz. Bir sensör bulunamadığında yalnız o sensörün `*_ok` alanı `false` olur.
 
@@ -147,8 +184,13 @@ Arduino her 100 ms'de bir JSON satırı gönderir:
   "current": 0.0,
   "power": 0.0,
   "charge": 0.0,
-  "capacity": 7.0,
-  "percentage": 0.0
+  "capacity": 3.3,
+  "percentage": 0.0,
+  "cell_voltage_avg": 0.0,
+  "average_discharge_current": 0.0,
+  "remaining_minutes": null,
+  "battery_confidence": 0.0,
+  "low_battery": false
 }
 ```
 
@@ -168,6 +210,11 @@ Alanlar:
 | `charge` | Tahmini kalan kapasite, Ah |
 | `capacity` | Pil kapasitesi, Ah |
 | `percentage` | Doluluk, 0,0–1,0 |
+| `cell_voltage_avg` | Paket geriliminin dört hücreye bölünmüş ortalaması, V |
+| `average_discharge_current` | Kalan süre hesabında kullanılan ortalama akım, A |
+| `remaining_minutes` | Tahmini kalan süre; hesaplanamıyorsa `null` |
+| `battery_confidence` | SoC tahmin güveni, 0,0–1,0 |
+| `low_battery` | Beş dakika/kritik gerilim alarm durumu |
 
 ## Sensörlerin bağımsız davranışı
 
@@ -250,6 +297,8 @@ Gerçek Jetson portu `/dev/ttyACM0` ise parametreyi buna göre değiştirin.
 | `odom -> base_link` | TF | Odometri dönüşümü |
 | `/battery` | `sensor_msgs/msg/BatteryState` | INA219 yoksa `present=false`, ölçümler `NaN` |
 | `/battery/power` | `std_msgs/msg/Float32` | INA219 yoksa `NaN` |
+| `/battery/remaining_minutes` | `std_msgs/msg/Float32` | Hesaplanamıyorsa `NaN` |
+| `/battery/low` | `std_msgs/msg/Bool` | Arduino düşük pil alarmı |
 
 Topic'leri kontrol edin:
 

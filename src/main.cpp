@@ -1,6 +1,8 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <Wire.h>
 #include <Adafruit_INA219.h>
+#include <stddef.h>
 
 // --- MOTOR VE ENCODER PINLERI ---
 const int enc1A = 2;  const int enc1B = 3;
@@ -8,6 +10,18 @@ const int enc2A = 18; const int enc2B = 19;
 const int PWMA = 5;   const int AIN1 = 7; const int AIN2 = 8;
 const int PWMB = 6;   const int BIN1 = 9; const int BIN2 = 10;
 const int STBY = 11;
+
+// --- PIL GOSTERGESI VE UYARI PINLERI ---
+const uint8_t buzzerPin = 22;
+const uint8_t redLedPin = 23;
+const uint8_t yellowLedPin = 24;
+const uint8_t greenLedPin = 25;
+const uint8_t buzzerActiveLevel = LOW;
+const uint8_t buzzerInactiveLevel = HIGH;
+const unsigned long buzzerMelodyPeriodMs = 20000UL;
+const unsigned long buzzerMelodyDurationMs = 3000UL;
+const unsigned long greenBlinkPeriodMs = 3000UL;
+const unsigned long greenBlinkOnMs = 300UL;
 
 const int encoderLeftSign = 1;
 const int encoderRightSign = 1;
@@ -32,11 +46,29 @@ float gyroZ_offset = 0.0f;
 const int imuCalibrationSamples = 500;
 const float gravityMs2 = 9.80665f;
 
-// --- 4S 7000 mAh LiPo / INA219 ---
-const float batteryCapacityAh = 7.0f;
-const float batteryFullVoltage = 16.8f;
-const float batteryEmptyVoltage = 14.0f;
+// --- 4S 3300 mAh 40C LiPo / INA219 ---
+const uint8_t batteryCellCount = 4;
+const float batteryCapacityAh = 3.3f;
+const float cellFullVoltage = 4.20f;
+const float cellEmptyVoltage = 3.00f;
+const float batteryFullVoltage = batteryCellCount * cellFullVoltage;
+const float batteryEmptyVoltage = batteryCellCount * cellEmptyVoltage;
+const float criticalPackVoltage = batteryEmptyVoltage;
+
+// Bu katsayilar referans multimetre/ampermetre ile kalibre edilebilir.
+const float voltageCalibrationGain = 1.0f;
 const float currentOffsetA = 0.0f;
+const float currentCalibrationGain = 1.0f;
+
+const float batteryFilterAlpha = 0.18f;
+const float averageCurrentTimeConstantS = 60.0f;
+const float restCurrentThresholdA = 0.08f;
+const unsigned long restRequiredMs = 30000UL;
+const float ocvCorrectionAlpha = 0.002f;
+const unsigned long lowTimeConfirmationMs = 10000UL;
+const unsigned long criticalVoltageConfirmationMs = 2000UL;
+const unsigned long batterySaveIntervalMs = 120000UL;
+const float batterySaveSocStep = 0.01f;
 
 float batteryVoltageV = 0.0f;
 float dischargeCurrentA = 0.0f;
@@ -44,7 +76,41 @@ float batteryCurrentA = 0.0f;  // ROS: desarjda negatif
 float batteryPowerW = 0.0f;    // ROS: desarjda negatif
 float remainingChargeAh = 0.0f;
 float batteryPercentage = 0.0f;
+float averageDischargeCurrentA = 0.0f;
+float remainingMinutes = -1.0f;
+float batteryConfidence = 0.0f;
+float previousDischargeCurrentA = 0.0f;
+bool batteryFilterInitialized = false;
+bool lowBatteryAlarm = false;
 unsigned long lastBatteryTime = 0;
+unsigned long batteryEstimateRuntimeMs = 0;
+unsigned long restStartMs = 0;
+unsigned long lowTimeCandidateMs = 0;
+unsigned long criticalVoltageCandidateMs = 0;
+unsigned long lowBatteryAlarmStartedMs = 0;
+unsigned long lastBatterySaveMs = 0;
+float lastSavedBatteryPercentage = -1.0f;
+
+enum BatteryLedState : uint8_t {
+  BATTERY_LED_UNKNOWN,
+  BATTERY_LED_RED,
+  BATTERY_LED_YELLOW,
+  BATTERY_LED_GREEN
+};
+
+BatteryLedState batteryLedState = BATTERY_LED_UNKNOWN;
+
+struct StoredBatteryState {
+  uint32_t magic;
+  uint32_t sequence;
+  float remainingAh;
+  uint16_t checksum;
+};
+
+const uint32_t batteryStateMagic = 0x4B43424DUL;
+const uint8_t batteryStateSlotCount = 16;
+uint8_t batteryStateSlot = 0;
+uint32_t batteryStateSequence = 0;
 
 // --- KONTROL VE ZAMANLAMA ---
 const int maxSpeed = 450;
@@ -72,6 +138,11 @@ bool readImuDirect(float &ax, float &ay, float &az,
 void calibrateImu();
 void readBattery(unsigned long nowMs);
 float estimateBatteryPercentage(float voltage);
+void updateBatteryIndicators(unsigned long nowMs);
+void updateBatteryAlarm(unsigned long nowMs);
+void persistBatteryState(unsigned long nowMs, bool force = false);
+bool restoreBatteryState(float &restoredRemainingAh);
+uint16_t batteryStateChecksum(const StoredBatteryState &state);
 
 void setup() {
   Serial.begin(115200);
@@ -84,7 +155,15 @@ void setup() {
   pinMode(PWMA, OUTPUT); pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
   pinMode(PWMB, OUTPUT); pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
   pinMode(STBY, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(redLedPin, OUTPUT);
+  pinMode(yellowLedPin, OUTPUT);
+  pinMode(greenLedPin, OUTPUT);
   digitalWrite(STBY, HIGH);
+  digitalWrite(buzzerPin, buzzerInactiveLevel);
+  digitalWrite(redLedPin, LOW);
+  digitalWrite(yellowLedPin, LOW);
+  digitalWrite(greenLedPin, LOW);
 
   attachInterrupt(digitalPinToInterrupt(enc1A), encoder1ISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(enc2A), encoder2ISR, CHANGE);
@@ -110,11 +189,42 @@ void setup() {
   if (ina219Available) {
     ina219.setCalibration_32V_2A();
     const float shuntVoltageV = ina219.getShuntVoltage_mV() / 1000.0f;
-    batteryVoltageV = ina219.getBusVoltage_V() + shuntVoltageV;
-    batteryPercentage = estimateBatteryPercentage(batteryVoltageV);
-    remainingChargeAh = batteryPercentage * batteryCapacityAh;
+    batteryVoltageV =
+        (ina219.getBusVoltage_V() + shuntVoltageV) * voltageCalibrationGain;
+    dischargeCurrentA =
+        ((ina219.getCurrent_mA() / 1000.0f) * currentCalibrationGain) -
+        currentOffsetA;
+    if (fabs(dischargeCurrentA) < 0.01f) dischargeCurrentA = 0.0f;
+
+    batteryFilterInitialized = true;
+    previousDischargeCurrentA = dischargeCurrentA;
+    averageDischargeCurrentA = max(dischargeCurrentA, 0.0f);
+
+    const float voltageBasedPercentage =
+        estimateBatteryPercentage(batteryVoltageV);
+    float restoredRemainingAh = 0.0f;
+    const bool stateRestored = restoreBatteryState(restoredRemainingAh);
+    const float restoredPercentage = restoredRemainingAh / batteryCapacityAh;
+
+    // Tam dolu paket yeni takildiysa eski EEPROM kaydini kullanma. Diger
+    // durumlarda, gerilim tahminiyle makul derecede uyusan sayaci geri yukle.
+    if (batteryVoltageV >= batteryFullVoltage - 0.08f) {
+      remainingChargeAh = batteryCapacityAh;
+      batteryConfidence = 1.0f;
+    } else if (stateRestored &&
+               fabs(restoredPercentage - voltageBasedPercentage) <= 0.30f) {
+      remainingChargeAh = restoredRemainingAh;
+      batteryConfidence = 0.75f;
+    } else {
+      remainingChargeAh = voltageBasedPercentage * batteryCapacityAh;
+      batteryConfidence = 0.35f;
+    }
+    batteryPercentage = remainingChargeAh / batteryCapacityAh;
+    lastSavedBatteryPercentage = batteryPercentage;
   }
   lastBatteryTime = millis();
+  lastBatterySaveMs = lastBatteryTime;
+  updateBatteryIndicators(lastBatteryTime);
 
   Serial.print("{\"status\":\"baslatildi\",\"imu_ok\":");
   Serial.print(mpuAvailable ? "true" : "false");
@@ -197,6 +307,7 @@ void loop() {
   if (ina219Available) {
     readBattery(nowMs);
   }
+  updateBatteryIndicators(nowMs);
 
   Serial.print("{\"t_ms\":"); Serial.print(nowMs);
   Serial.print(",\"imu_ok\":"); Serial.print(mpuAvailable ? "true" : "false");
@@ -215,6 +326,17 @@ void loop() {
   Serial.print(",\"charge\":"); Serial.print(remainingChargeAh, 4);
   Serial.print(",\"capacity\":"); Serial.print(batteryCapacityAh, 2);
   Serial.print(",\"percentage\":"); Serial.print(batteryPercentage, 4);
+  Serial.print(",\"cell_voltage_avg\":");
+  Serial.print(batteryVoltageV / batteryCellCount, 3);
+  Serial.print(",\"average_discharge_current\":");
+  Serial.print(averageDischargeCurrentA, 3);
+  Serial.print(",\"remaining_minutes\":");
+  if (remainingMinutes >= 0.0f) Serial.print(remainingMinutes, 1);
+  else Serial.print("null");
+  Serial.print(",\"battery_confidence\":");
+  Serial.print(batteryConfidence, 3);
+  Serial.print(",\"low_battery\":");
+  Serial.print(lowBatteryAlarm ? "true" : "false");
   Serial.println("}");
 }
 
@@ -300,28 +422,268 @@ void calibrateImu() {
 }
 
 float estimateBatteryPercentage(float voltage) {
-  const float result =
-      (voltage - batteryEmptyVoltage) /
-      (batteryFullVoltage - batteryEmptyVoltage);
-  return constrain(result, 0.0f, 1.0f);
+  // Dinlenme gerilimi icin genel 4.20 V LiPo OCV egrisi. Uc noktalar
+  // kullanicinin belirledigi 3.00 V ve 4.20 V sinirlaridir.
+  static const float cellVoltages[] = {
+      3.00f, 3.30f, 3.50f, 3.60f, 3.68f, 3.73f, 3.77f,
+      3.80f, 3.84f, 3.89f, 3.96f, 4.05f, 4.12f, 4.20f};
+  static const float percentages[] = {
+      0.00f, 0.01f, 0.03f, 0.06f, 0.12f, 0.20f, 0.30f,
+      0.40f, 0.50f, 0.60f, 0.70f, 0.80f, 0.90f, 1.00f};
+  const uint8_t pointCount = sizeof(cellVoltages) / sizeof(cellVoltages[0]);
+  const float cellVoltage = voltage / batteryCellCount;
+
+  if (cellVoltage <= cellVoltages[0]) return 0.0f;
+  if (cellVoltage >= cellVoltages[pointCount - 1]) return 1.0f;
+
+  for (uint8_t i = 1; i < pointCount; ++i) {
+    if (cellVoltage <= cellVoltages[i]) {
+      const float fraction =
+          (cellVoltage - cellVoltages[i - 1]) /
+          (cellVoltages[i] - cellVoltages[i - 1]);
+      return percentages[i - 1] +
+             fraction * (percentages[i] - percentages[i - 1]);
+    }
+  }
+  return 1.0f;
 }
 
 void readBattery(unsigned long nowMs) {
   const float shuntVoltageV = ina219.getShuntVoltage_mV() / 1000.0f;
-  batteryVoltageV = ina219.getBusVoltage_V() + shuntVoltageV;
-  dischargeCurrentA = (ina219.getCurrent_mA() / 1000.0f) - currentOffsetA;
-  if (fabs(dischargeCurrentA) < 0.01f) dischargeCurrentA = 0.0f;
+  const float measuredVoltage =
+      (ina219.getBusVoltage_V() + shuntVoltageV) * voltageCalibrationGain;
+  float measuredCurrent =
+      ((ina219.getCurrent_mA() / 1000.0f) * currentCalibrationGain) -
+      currentOffsetA;
+  if (fabs(measuredCurrent) < 0.01f) measuredCurrent = 0.0f;
 
-  if (lastBatteryTime != 0) {
-    const float elapsedHours = (nowMs - lastBatteryTime) / 3600000.0f;
-    remainingChargeAh -= dischargeCurrentA * elapsedHours;
+  // INA219 32 V / 2 A ayari disindaki veya bozuk ornekleri hesaba katma.
+  if (!isfinite(measuredVoltage) || !isfinite(measuredCurrent) ||
+      measuredVoltage < 6.0f || measuredVoltage > 26.0f ||
+      fabs(measuredCurrent) > 2.1f) {
+    return;
+  }
+
+  if (!batteryFilterInitialized) {
+    batteryVoltageV = measuredVoltage;
+    dischargeCurrentA = measuredCurrent;
+    previousDischargeCurrentA = measuredCurrent;
+    averageDischargeCurrentA = max(measuredCurrent, 0.0f);
+    batteryFilterInitialized = true;
+  } else {
+    batteryVoltageV += batteryFilterAlpha * (measuredVoltage - batteryVoltageV);
+    dischargeCurrentA += batteryFilterAlpha * (measuredCurrent - dischargeCurrentA);
+  }
+
+  const unsigned long elapsedMs = nowMs - lastBatteryTime;
+  const float elapsedSeconds = elapsedMs / 1000.0f;
+  if (lastBatteryTime != 0 && elapsedMs <= 2000UL) {
+    const float elapsedHours = elapsedSeconds / 3600.0f;
+    const float trapezoidCurrent =
+        0.5f * (previousDischargeCurrentA + dischargeCurrentA);
+    remainingChargeAh -= trapezoidCurrent * elapsedHours;
     remainingChargeAh = constrain(remainingChargeAh, 0.0f, batteryCapacityAh);
+
+    const float positiveCurrent = max(dischargeCurrentA, 0.0f);
+    const float averageAlpha =
+        elapsedSeconds / (averageCurrentTimeConstantS + elapsedSeconds);
+    averageDischargeCurrentA +=
+        averageAlpha * (positiveCurrent - averageDischargeCurrentA);
+
+    if (batteryEstimateRuntimeMs < 60000UL) {
+      batteryEstimateRuntimeMs =
+          min(60000UL, batteryEstimateRuntimeMs + elapsedMs);
+    }
   }
   lastBatteryTime = nowMs;
+  previousDischargeCurrentA = dischargeCurrentA;
+
+  // Gerilim sadece pil yeterince dinlendiginde coulomb sayacini yavasca
+  // duzeltir. Motor yukundeki gerilim cokmeleri yuzdeyi aniden degistirmez.
+  if (fabs(dischargeCurrentA) <= restCurrentThresholdA) {
+    if (restStartMs == 0) restStartMs = nowMs;
+    if (nowMs - restStartMs >= restRequiredMs) {
+      const float ocvChargeAh =
+          estimateBatteryPercentage(batteryVoltageV) * batteryCapacityAh;
+      remainingChargeAh +=
+          ocvCorrectionAlpha * (ocvChargeAh - remainingChargeAh);
+      batteryConfidence = max(batteryConfidence, 0.90f);
+    }
+  } else {
+    restStartMs = 0;
+  }
 
   batteryPercentage = remainingChargeAh / batteryCapacityAh;
   batteryCurrentA = -dischargeCurrentA;
   batteryPowerW = batteryVoltageV * batteryCurrentA;
+
+  if (averageDischargeCurrentA >= 0.05f &&
+      batteryEstimateRuntimeMs >= 10000UL) {
+    remainingMinutes =
+        (remainingChargeAh / averageDischargeCurrentA) * 60.0f;
+  } else {
+    remainingMinutes = -1.0f;
+  }
+
+  const float runtimeConfidence =
+      0.35f + 0.65f * (batteryEstimateRuntimeMs / 60000.0f);
+  batteryConfidence = max(batteryConfidence, min(runtimeConfidence, 1.0f));
+
+  updateBatteryAlarm(nowMs);
+  persistBatteryState(nowMs);
+}
+
+void updateBatteryAlarm(unsigned long nowMs) {
+  const bool lowTime =
+      remainingMinutes >= 0.0f && remainingMinutes <= 5.0f;
+  if (lowTime) {
+    if (lowTimeCandidateMs == 0) lowTimeCandidateMs = nowMs;
+  } else if (remainingMinutes < 0.0f || remainingMinutes > 6.0f) {
+    lowTimeCandidateMs = 0;
+  }
+
+  const bool criticalVoltage = batteryVoltageV <= criticalPackVoltage;
+  if (criticalVoltage) {
+    if (criticalVoltageCandidateMs == 0) criticalVoltageCandidateMs = nowMs;
+  } else if (batteryVoltageV >= criticalPackVoltage + 0.40f) {
+    criticalVoltageCandidateMs = 0;
+  }
+
+  const bool timeConfirmed =
+      lowTimeCandidateMs != 0 &&
+      nowMs - lowTimeCandidateMs >= lowTimeConfirmationMs;
+  const bool voltageConfirmed =
+      criticalVoltageCandidateMs != 0 &&
+      nowMs - criticalVoltageCandidateMs >= criticalVoltageConfirmationMs;
+
+  if (!lowBatteryAlarm &&
+      (timeConfirmed || voltageConfirmed || batteryPercentage <= 0.03f)) {
+    lowBatteryAlarm = true;
+    lowBatteryAlarmStartedMs = nowMs;
+  } else if ((remainingMinutes < 0.0f || remainingMinutes > 6.0f) &&
+             batteryPercentage > 0.05f &&
+             batteryVoltageV > criticalPackVoltage + 0.40f) {
+    lowBatteryAlarm = false;
+    lowBatteryAlarmStartedMs = 0;
+  }
+}
+
+void updateBatteryIndicators(unsigned long nowMs) {
+  if (!ina219Available) {
+    digitalWrite(redLedPin, ((nowMs / 500UL) % 2UL) ? HIGH : LOW);
+    digitalWrite(yellowLedPin, LOW);
+    digitalWrite(greenLedPin, LOW);
+    noTone(buzzerPin);
+    digitalWrite(buzzerPin, buzzerInactiveLevel);
+    batteryLedState = BATTERY_LED_UNKNOWN;
+    return;
+  }
+
+  if (batteryLedState == BATTERY_LED_UNKNOWN) {
+    if (batteryPercentage >= 0.80f) batteryLedState = BATTERY_LED_GREEN;
+    else if (batteryPercentage >= 0.50f) batteryLedState = BATTERY_LED_YELLOW;
+    else batteryLedState = BATTERY_LED_RED;
+  } else if (batteryLedState == BATTERY_LED_GREEN && batteryPercentage < 0.78f) {
+    batteryLedState =
+        batteryPercentage < 0.48f ? BATTERY_LED_RED : BATTERY_LED_YELLOW;
+  } else if (batteryLedState == BATTERY_LED_YELLOW) {
+    if (batteryPercentage >= 0.82f) batteryLedState = BATTERY_LED_GREEN;
+    else if (batteryPercentage < 0.48f) batteryLedState = BATTERY_LED_RED;
+  } else if (batteryLedState == BATTERY_LED_RED && batteryPercentage >= 0.52f) {
+    batteryLedState =
+        batteryPercentage >= 0.82f ? BATTERY_LED_GREEN : BATTERY_LED_YELLOW;
+  }
+
+  digitalWrite(redLedPin, batteryLedState == BATTERY_LED_RED ? HIGH : LOW);
+  digitalWrite(yellowLedPin,
+               batteryLedState == BATTERY_LED_YELLOW ? HIGH : LOW);
+  const bool greenPulse =
+      batteryLedState == BATTERY_LED_GREEN &&
+      (nowMs % greenBlinkPeriodMs) < greenBlinkOnMs;
+  digitalWrite(greenLedPin, greenPulse ? HIGH : LOW);
+
+  // LOW-tetiklemeli aktif buzzer alarm basladiginda ve daha sonra her 20
+  // saniyede bir, 3 saniyelik bildirim ritmi calar.
+  if (lowBatteryAlarm) {
+    const unsigned long cycleTime =
+        (nowMs - lowBatteryAlarmStartedMs) % buzzerMelodyPeriodMs;
+    bool buzzerOn = false;
+    if (cycleTime < buzzerMelodyDurationMs) {
+      buzzerOn =
+          cycleTime < 140UL ||
+          (cycleTime >= 230UL && cycleTime < 370UL) ||
+          (cycleTime >= 460UL && cycleTime < 740UL) ||
+          (cycleTime >= 900UL && cycleTime < 1080UL) ||
+          (cycleTime >= 1160UL && cycleTime < 1340UL) ||
+          (cycleTime >= 1420UL && cycleTime < 1760UL) ||
+          (cycleTime >= 1940UL && cycleTime < 2140UL) ||
+          (cycleTime >= 2240UL && cycleTime < 2440UL) ||
+          (cycleTime >= 2540UL && cycleTime < 2920UL);
+    }
+    digitalWrite(buzzerPin,
+                 buzzerOn ? buzzerActiveLevel : buzzerInactiveLevel);
+  } else {
+    noTone(buzzerPin);
+    digitalWrite(buzzerPin, buzzerInactiveLevel);
+  }
+}
+
+uint16_t batteryStateChecksum(const StoredBatteryState &state) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&state);
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < offsetof(StoredBatteryState, checksum); ++i) {
+    crc ^= static_cast<uint16_t>(bytes[i]) << 8;
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+    }
+  }
+  return crc;
+}
+
+bool restoreBatteryState(float &restoredRemainingAh) {
+  bool found = false;
+  StoredBatteryState best = {};
+  for (uint8_t slot = 0; slot < batteryStateSlotCount; ++slot) {
+    StoredBatteryState candidate = {};
+    EEPROM.get(slot * sizeof(StoredBatteryState), candidate);
+    const bool valid =
+        candidate.magic == batteryStateMagic &&
+        candidate.checksum == batteryStateChecksum(candidate) &&
+        isfinite(candidate.remainingAh) && candidate.remainingAh >= 0.0f &&
+        candidate.remainingAh <= batteryCapacityAh;
+    if (valid && (!found ||
+                  static_cast<int32_t>(candidate.sequence - best.sequence) > 0)) {
+      best = candidate;
+      batteryStateSlot = slot;
+      found = true;
+    }
+  }
+
+  if (!found) return false;
+  batteryStateSequence = best.sequence;
+  restoredRemainingAh = best.remainingAh;
+  return true;
+}
+
+void persistBatteryState(unsigned long nowMs, bool force) {
+  if (!force) {
+    if (nowMs - lastBatterySaveMs < batterySaveIntervalMs) return;
+    if (lastSavedBatteryPercentage >= 0.0f &&
+        fabs(batteryPercentage - lastSavedBatteryPercentage) <
+            batterySaveSocStep) {
+      return;
+    }
+  }
+
+  batteryStateSlot = (batteryStateSlot + 1) % batteryStateSlotCount;
+  StoredBatteryState state = {};
+  state.magic = batteryStateMagic;
+  state.sequence = ++batteryStateSequence;
+  state.remainingAh = remainingChargeAh;
+  state.checksum = batteryStateChecksum(state);
+  EEPROM.put(batteryStateSlot * sizeof(StoredBatteryState), state);
+  lastBatterySaveMs = nowMs;
+  lastSavedBatteryPercentage = batteryPercentage;
 }
 
 void encoder1ISR() {

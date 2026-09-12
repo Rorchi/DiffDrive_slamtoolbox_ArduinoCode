@@ -9,7 +9,7 @@ from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState, Imu
-from std_msgs.msg import Float32, Int64MultiArray
+from std_msgs.msg import Bool, Float32, Int64MultiArray
 from tf2_ros import TransformBroadcaster
 
 
@@ -49,6 +49,8 @@ class SerialSensorBridge(Node):
         self.odom_pub = self.create_publisher(Odometry, '/odom', 20)
         self.battery_pub = self.create_publisher(BatteryState, '/battery', 10)
         self.battery_power_pub = self.create_publisher(Float32, '/battery/power', 10)
+        self.battery_time_pub = self.create_publisher(Float32, '/battery/remaining_minutes', 10)
+        self.low_battery_pub = self.create_publisher(Bool, '/battery/low', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.last_enc = None
         self.last_stamp = None
@@ -126,7 +128,7 @@ class SerialSensorBridge(Node):
         msg = BatteryState()
         msg.header.stamp = stamp
         msg.header.frame_id = self.battery_frame
-        msg.design_capacity = 7.0
+        msg.design_capacity = float(d.get('capacity', 3.3))
         msg.temperature = math.nan
         msg.cell_voltage = [math.nan] * 4
         msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LIPO
@@ -136,6 +138,8 @@ class SerialSensorBridge(Node):
         fields = ('voltage', 'current', 'power', 'charge', 'capacity', 'percentage')
         battery_ok = d.get('battery_ok', False) is True and all(key in d for key in fields)
         power_msg = Float32()
+        remaining_time_msg = Float32()
+        low_battery_msg = Bool()
 
         if not battery_ok:
             msg.voltage = math.nan
@@ -147,6 +151,8 @@ class SerialSensorBridge(Node):
             msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_UNKNOWN
             msg.present = False
             power_msg.data = math.nan
+            remaining_time_msg.data = math.nan
+            low_battery_msg.data = False
         else:
             msg.voltage = float(d['voltage'])
             msg.current = float(d['current'])
@@ -156,6 +162,11 @@ class SerialSensorBridge(Node):
             msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
             msg.present = True
             power_msg.data = float(d['power'])
+            remaining_minutes = d.get('remaining_minutes')
+            remaining_time_msg.data = (
+                float(remaining_minutes) if remaining_minutes is not None else math.nan
+            )
+            low_battery_msg.data = d.get('low_battery', False) is True
 
             if msg.current < -0.05:
                 msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
@@ -168,6 +179,8 @@ class SerialSensorBridge(Node):
 
         self.battery_pub.publish(msg)
         self.battery_power_pub.publish(power_msg)
+        self.battery_time_pub.publish(remaining_time_msg)
+        self.low_battery_pub.publish(low_battery_msg)
 
 def main():
     rclpy.init()

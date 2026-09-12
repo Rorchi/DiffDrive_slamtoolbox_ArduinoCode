@@ -8,6 +8,10 @@ Arduino Mega her 100 ms'de USB seri hattan JSON Lines paketi yollar. Bu köprü 
 | `/wheel/encoders` | `std_msgs/Int64MultiArray` | `[sol_tick, sağ_tick]` ham sayacı |
 | `/odom` | `nav_msgs/Odometry` | Diferansiyel sürüş tekerlek odometrisi |
 | `odom -> base_link` | TF | `slam_toolbox` için zorunlu dönüşüm |
+| `/battery` | `sensor_msgs/BatteryState` | Gerilim, akım, kapasite ve SoC |
+| `/battery/power` | `std_msgs/Float32` | Anlık pil gücü |
+| `/battery/remaining_minutes` | `std_msgs/Float32` | Tahmini kalan süre |
+| `/battery/low` | `std_msgs/Bool` | Arduino kritik pil uyarısı |
 
 `slam_toolbox` yalnızca IMU/encoder ile harita çıkarmaz: bir LiDAR düğümünün ayrıca `/scan` (`sensor_msgs/LaserScan`) yayımlaması gerekir. Köprüdeki `odom -> base_link` TF'si ve LiDAR sürücüsündeki `base_link -> laser_frame` statik TF'si hazır olmalıdır.
 
