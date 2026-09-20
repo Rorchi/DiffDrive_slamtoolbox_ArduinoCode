@@ -1,10 +1,46 @@
-# Kâşif Çelebi — Arduino Mega ve ROS 2 Sensör Köprüsü
+# Kâşif Çelebi — Mega2560 Sayısal Tekerlek Hızı ve Sensör Firmware'i
 
 ![Kâşif Çelebi robotunun ön görünümü](docs/images/kasif_celebi.jpeg)
 
-Bu proje, diferansiyel sürüşlü Kâşif Çelebi robotunun düşük seviye motor kontrolünü ve sensör okumalarını Arduino Mega 2560 üzerinde gerçekleştirir. Arduino verileri USB seri bağlantısı üzerinden JSON Lines biçiminde NVIDIA Jetson'a gönderir. Jetson'daki ROS 2 Humble köprüsü bu verileri standart ROS mesajlarına ve TF dönüşümlerine çevirir.
+Bu proje, diferansiyel sürüşlü Kâşif Çelebi robotunun düşük seviye tekerlek hız
+kontrolünü ve sensör okumalarını Arduino Mega 2560 üzerinde gerçekleştirir.
+Jetson'dan gelen sayısal sol/sağ hız hedefleri `wheel_v1` protokolüyle uygulanır;
+encoder, IMU ve batarya verileri USB üzerinden JSON Lines biçiminde Jetson'a
+gönderilir. Jetson'daki ROS 2 Humble köprüsü bu verileri ROS mesajlarına ve TF
+dönüşümlerine çevirir.
 
 Proje hata toleranslı tasarlanmıştır: MPU6050 veya INA219 bulunamadığında motor kontrolü ve encoder/odometri veri akışı durmaz. Her sensörün geçerliliği ayrı bir durum alanıyla bildirilir.
+
+## Güncel sürüm durumu
+
+| Özellik | Durum |
+|---|---|
+| Arduino hedefi | Mega2560 / ATmega2560 |
+| Motor protokolü | `wheel_v1`: `V1 <sol_mm_s> <sag_mm_s>\n` |
+| Hız sınırı | Her tekerlek için ±150 mm/s |
+| Motor kontrol çevrimi | 50 Hz, gerçek `dt` tabanlı |
+| Sensör telemetrisi | 10 Hz JSON Lines |
+| Komut timeout'u | 500 ms |
+| Güvenlik | Yön değiştirme beklemesi, stall/encoder hatası, AVR watchdog |
+| Son doğrulama | 20 Eylül 2026 — derleme, 3/3 test, yükleme ve canlı telemetri başarılı |
+
+Firmware `/dev/ttyUSB0` üzerindeki Mega2560'a yüklenmiş ve flash doğrulaması
+tamamlanmıştır. Kart üzerinde `command_protocol="wheel_v1"`, MPU6050,
+INA219, sıfır motor hedefi ve `motor_fault=false` telemetrisi görülmüştür.
+Hareketli fiziksel yön ve hız ayarı, robot güvenli biçimde kaldırılarak ayrıca
+yapılmalıdır.
+
+## Kaynak ve yerel değişiklikler
+
+Motor pin seviyeleri ve ilk firmware yapısı
+[Rorchi/DiffDrive_slamtoolbox_ArduinoCode](https://github.com/Rorchi/DiffDrive_slamtoolbox_ArduinoCode)
+deposundaki `418743e21174c369eeb10c63c815aff1605985ed` commit'i temel alınarak
+geliştirilmiştir. Bu dizin değiştirilmiş yerel kopyadır; değişiklikler kaynak
+depoya gönderilmemiştir.
+
+Bu sürümde eski `W/X/A/D` hareket arayüzü kaldırılmış; sayısal tekerlek hızı,
+sınırlandırılmış ASCII parser, gerçek zaman aralığıyla encoder geri beslemesi,
+motor sıkışma koruması, batarya izleme ve yerel birim testleri eklenmiştir.
 
 ## Sistem mimarisi
 
@@ -33,8 +69,18 @@ kasif_celebi/
 ├── README.md
 ├── BATARYA_IZLEME_RAPORU.md
 ├── BATARYA_IZLEME_RAPORU.docx
-└── src/
-    └── main.cpp
+├── BATARYA_IZLEME_RAPORU.odt
+├── docs/
+│   └── images/
+│       └── kasif_celebi.jpeg
+├── src/
+│   ├── main.cpp
+│   └── wheel_protocol.h
+├── test/
+│   └── test_wheel_protocol/
+│       └── test_main.cpp
+└── tools/
+    └── build_imu_doc.py
 ```
 
 ## Teknik raporlar
@@ -129,13 +175,16 @@ Yanmış veya hasarlı bir INA219 kartını yeniden bağlamayın.
 3. Motor ve encoder pinleri hazırlanır.
 4. MPU6050 aranır. Bulunursa ayarlanır ve araç hareketsizken kalibre edilir.
 5. INA219 aranır. Bulunursa batarya gerilimi ve başlangıç doluluk tahmini alınır.
-6. Ana döngü 10 Hz çalışır:
-   - Jetson'dan motor komutu okunur.
-   - Bir saniye komut alınmazsa watchdog motorları durdurur.
-   - Encoder sayıları alınır ve P kontrol uygulanır.
+6. Ana döngü sürekli çalışır:
+   - Jetson'dan `wheel_v1` tekerlek hız komutları okunur.
+   - Motor hız kontrolü gerçek `dt` ile 50 Hz çalışır.
+   - Geçerli komut 500 ms kesilirse motorlar durdurulur.
+   - Encoder hareketi olmadan yüksek PWM sürerse motor arızası kilitlenir.
    - Mevcut sensörlerden ölçüm alınır.
    - Pil yüzdesi, kalan süre, LED'ler ve buzzer alarmı güncellenir.
-   - Tek satırlık JSON paketi USB'ye yazılır.
+   - Her 100 ms'de tek satırlık JSON telemetri paketi USB'ye yazılır.
+7. AVR donanım watchdog'u ana döngü bir saniye çalışmazsa kartı yeniden başlatır;
+   motor sürücü `STBY` pini başlangıç tamamlanana kadar pasif tutulur.
 
 ## Pil yüzdesi ve kalan süre hesabı
 
@@ -163,17 +212,30 @@ Sensör başlangıçlarında `while (1)` kullanılmaz. Bir sensör bulunamadığ
 
 ## Motor komutları
 
-Jetson Arduino'ya tek karakter gönderir:
+Jetson, Arduino'ya `115200` baud hızında aşağıdaki ASCII çerçevesini gönderir:
 
-| Komut | İşlev |
+```text
+V1 <sol_mm_s> <sag_mm_s>\n
+```
+
+Her tekerlek `-150..150 mm/s` aralığındadır; pozitif değer ileri, negatif değer
+geridir. Eski `W/X/A/D` komutları artık kabul edilmez. Tek `S` baytı acil olarak
+PWM'yi sıfırlar ancak kilitlenmiş encoder/motor arızasını temizlemez.
+
+| Hareket | Komut |
 |---|---|
-| `W` | İleri |
-| `X` | Geri |
-| `A` | Sola dön |
-| `D` | Sağa dön |
-| `S` | Dur |
+| İleri | `V1 80 80` + LF |
+| Geri | `V1 -80 -80` + LF |
+| Sola yerinde dönüş | `V1 -30 30` + LF |
+| Sağa yerinde dönüş | `V1 30 -30` + LF |
+| İlerlerken sola | `V1 70 130` + LF |
+| Kontrollü duruş ve motor arızası kilidini temizleme | `V1 0 0` + LF |
 
-Bir saniye boyunca komut alınmazsa güvenlik watchdog'u hedef hızları sıfırlar.
+Yalnız eksiksiz ve geçerli bir `V1` paketi komut watchdog'unu yeniler. Geçersiz
+paket, taşma veya 500 ms komut kesintisi motorları durdurur. Yön değişiminde PWM
+en az 200 ms kesilir ve encoder hızı iki ardışık örnekte düşük görülmeden ters
+yön uygulanmaz. Hedef hız varken PWM 180 veya üzerinde ve encoder hızı yaklaşık
+600 ms boyunca sıfıra yakın kalırsa `motor_fault=true` olur ve iki motor durur.
 
 ## USB JSON protokolü
 
@@ -191,6 +253,13 @@ Arduino her 100 ms'de bir JSON satırı gönderir:
   "gz": 0.0,
   "enc_l": 120,
   "enc_r": 118,
+  "target_left_mps": 0.08,
+  "target_right_mps": 0.08,
+  "speed_left_mps": 0.078,
+  "speed_right_mps": 0.079,
+  "pwm_left": 121,
+  "pwm_right": 124,
+  "motor_fault": false,
   "battery_ok": false,
   "voltage": 0.0,
   "current": 0.0,
@@ -215,6 +284,10 @@ Alanlar:
 | `ax`, `ay`, `az` | İvme, m/s² |
 | `gx`, `gy`, `gz` | Açısal hız, rad/s |
 | `enc_l`, `enc_r` | Sol ve sağ encoder ham tick sayısı |
+| `target_left_mps`, `target_right_mps` | Komut edilen tekerlek hızları, m/s |
+| `speed_left_mps`, `speed_right_mps` | Encoder tabanlı ölçülen tekerlek hızları, m/s |
+| `pwm_left`, `pwm_right` | Motor PWM çıkışları, 0–255 |
+| `motor_fault` | Encoder kopması veya mekanik sıkışma nedeniyle kilitlenen motor hatası |
 | `battery_ok` | INA219 ölçümünün geçerli olup olmadığı |
 | `voltage` | Pil gerilimi, V |
 | `current` | Akım, A; ROS kuralına göre deşarjda negatif |
@@ -249,6 +322,12 @@ Derleyin:
 
 ```bash
 ~/.platformio/penv/bin/pio run
+```
+
+Tekerlek protokolü birim testlerini çalıştırın:
+
+```bash
+~/.platformio/penv/bin/pio test -e native
 ```
 
 Arduino `/dev/ttyUSB0` üzerindeyse yükleyin:
@@ -291,6 +370,7 @@ Jetson'a kopyalanan `serial_bridge.py` dosyasının bulunduğu klasörde bridge'
 python3 serial_bridge.py --ros-args \
   -p port:=/dev/arduino \
   -p baudrate:=115200 \
+  -p command_protocol:=wheel_v1 \
   -p wheel_radius:=0.04 \
   -p wheel_base:=0.20 \
   -p encoder_ticks_per_rev:=7000.0
@@ -300,6 +380,11 @@ python3 serial_bridge.py --ros-args \
 ikinci bir kopyası bulunmaz. `/dev/arduino` udev bağlantısı tanımlı değilse gerçek portu, örneğin
 `/dev/ttyACM0` veya `/dev/ttyUSB0`, parametre olarak verin. Aynı seri portu
 başka bir bridge veya seri monitör ile eş zamanlı açmayın.
+
+> **Zorunlu uyumluluk:** Jetson bridge `command_protocol` parametresini
+> tanımıyorsa veya `legacy` modda çalışıyorsa bu firmware robotu sürmez.
+> Bridge'in `wheel_v1` modunda `cmd_vel` değerlerini sol/sağ mm/s paketlerine
+> dönüştürmesi ve en az 2 Hz'den hızlı komut göndermesi gerekir.
 
 ## ROS 2 topic'leri
 
@@ -335,6 +420,7 @@ Bridge parametreleri gerçek robota göre ölçülmelidir:
 - `wheel_radius`: tekerlek yarıçapı
 - `wheel_base`: sol ve sağ tekerlek merkezleri arasındaki mesafe
 - `encoder_ticks_per_rev`: bir tekerlek turundaki encoder tick sayısı
+- `command_protocol`: yeni firmware için `wheel_v1`
 
 Yanlış parametreler `/odom` mesafe ve açı hesabını bozar.
 
@@ -367,6 +453,25 @@ Aynı seri portu yalnızca bir program açmalıdır. Bridge çalışırken `cat`
 
 Baud her iki tarafta da `115200` olmalıdır. Jetson bridge seri timeout değeri uzun JSON paketleri tamamlanabilsin diye `0.2` saniyedir.
 
+### `motor_fault=true`
+
+Robotu kaldırıp tekerlekleri boşta ve düşük hızda sınayın. Encoder kablolarını,
+encoder yönlerini ve `7000 tick/tur` değerini doğrulayın. Mekanik sıkışma yoksa
+Jetson'dan `V1 0 0\n` göndererek kilidi temizleyin. Hata tekrar ediyorsa yüksek
+hız komutu vermeyin; encoder geri beslemesi doğrulanmadan korumayı kapatmayın.
+
+## İlk navigasyon testi
+
+1. Robotu tekerlekleri zeminden kesik ve çevresi boş olacak şekilde sabitleyin.
+2. Jetson bridge'i `command_protocol:=wheel_v1` ile başlatın.
+3. Önce `V1 30 30`, ardından `V1 -30 -30` komutlarını deneyin.
+4. `enc_l`, `enc_r`, `speed_left_mps` ve `speed_right_mps` işaretlerini kontrol edin.
+5. `V1 -30 30` sola, `V1 30 -30` sağa dönmelidir.
+6. Jetson komutunu kesin; motorlar en geç 500 ms içinde PWM sıfıra dönmelidir.
+7. Fiziksel doğrulamadan sonra Nav2 için başlangıç sınırlarını yaklaşık
+   `0.12 m/s` doğrusal ve `0.8 rad/s` açısal hızla sınırlayın; kontrolcü kazançlarını
+   zeminde kademeli olarak ayarlayın.
+
 ## Mevcut sınırlamalar
 
 - MPU6050 mutlak yönelim üretmez; `orientation_covariance[0] = -1` kullanılır.
@@ -381,3 +486,9 @@ Baud her iki tarafta da `115200` olmalıdır. Jetson bridge seri timeout değeri
   daha yüksek akıma uygun sensör ve şönt kullanılmalıdır.
 - `sensor_msgs/msg/BatteryState` içinde güç alanı bulunmadığı için güç `/battery/power` topic'inde ayrıca yayımlanır.
 - SLAM için ayrıca LiDAR `/scan` topic'i ve doğru statik TF dönüşümleri gerekir.
+- `7000 tick/tur`, mevcut yalnız-A-kanalı `CHANGE` ISR sayımına göre fiziksel
+  olarak ölçülmelidir; encoder veri sayfasındaki CPR değeri doğrudan aynı olmayabilir.
+- Hız regülatörü güvenli bir başlangıç ayarıdır, yük altında fiziksel olarak
+  ayarlanmış tam bir PID değildir.
+- AVR watchdog yazılım donmasını sınırlar; motor sürücünün `STBY` pininde harici
+  pull-down ve erişilebilir fiziksel acil durdurma kullanılması önerilir.
