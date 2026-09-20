@@ -859,6 +859,20 @@ void runWheelControl(unsigned long nowMs) {
   measuredSpeedB =
       (encoderRightSign * static_cast<float>(deltaE2)) / (dt * ticksPerMeter);
 
+  // A direction change is a coordinated stop: do not let the other wheel
+  // accelerate while one channel is still inside its reversal coast period.
+  const bool reversingA = targetSpeedA != 0.0f &&
+      (targetSpeedA > 0.0f ? 1 : -1) != wheelAState.direction;
+  const bool reversingB = targetSpeedB != 0.0f &&
+      (targetSpeedB > 0.0f ? 1 : -1) != wheelBState.direction;
+  if (reversingA || reversingB) {
+    controlWheel(reversingA ? targetSpeedA : 0.0f, speedTicksA, dt,
+                 wheelAState, PWMA, AIN1, AIN2, true, nowMs);
+    controlWheel(reversingB ? targetSpeedB : 0.0f, speedTicksB, dt,
+                 wheelBState, PWMB, BIN1, BIN2, false, nowMs);
+    return;
+  }
+
   const bool faultA =
       controlWheel(targetSpeedA, speedTicksA, dt, wheelAState,
                    PWMA, AIN1, AIN2, true, nowMs);
